@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Apex Stream</string>
+    <string name="target_url">https://web.apex-stream.com</string>
+</resources>
