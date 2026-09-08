@@ -2,10 +2,14 @@ package com.apexstream.tvapp
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ProgressBar
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
@@ -14,6 +18,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
 
     private val targetUrl = "https://web.apex-stream.com"
+
+    private var backPressedOnce = false
+    private val backHandler = Handler(Looper.getMainLooper())
+
+    private var lastNavTime = 0L
+    private val navThrottleMs = 180L
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,7 +83,7 @@ class MainActivity : AppCompatActivity() {
                     if (prev) prev.classList.remove('__apex_tv_focus');
                     if (el) {
                         el.classList.add('__apex_tv_focus');
-                        el.scrollIntoView({block: 'center', inline: 'center', behavior: 'smooth'});
+                        el.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
                     }
                 }
 
@@ -139,6 +149,43 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript(js, null)
     }
 
+    /**
+     * Tries to let the web page handle the back action itself:
+     * - exits native fullscreen (common for <video> fullscreen)
+     * - dispatches an Escape keydown (common convention to close players/modals)
+     * - pauses any playing <video>
+     * Returns (via callback) whether the page reported that something was closed.
+     */
+    private fun tryWebPageBack(onResult: (Boolean) -> Unit) {
+        val js = """
+            (function() {
+                var handled = false;
+
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                    handled = true;
+                }
+
+                var evt = new KeyboardEvent('keydown', {
+                    key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
+                });
+                document.dispatchEvent(evt);
+
+                var video = document.querySelector('video');
+                if (video && !video.paused) {
+                    video.pause();
+                    handled = true;
+                }
+
+                return handled;
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(js) { result ->
+            onResult(result == "true")
+        }
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         val direction = when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> "up"
@@ -148,7 +195,11 @@ class MainActivity : AppCompatActivity() {
             else -> null
         }
         if (direction != null) {
-            webView.evaluateJavascript("window.__apexMove && window.__apexMove('$direction');", null)
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastNavTime >= navThrottleMs) {
+                lastNavTime = now
+                webView.evaluateJavascript("window.__apexMove && window.__apexMove('$direction');", null)
+            }
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
@@ -160,6 +211,19 @@ class MainActivity : AppCompatActivity() {
                 webView.goBack()
                 return true
             }
+
+            tryWebPageBack { handled ->
+                if (!handled) {
+                    if (backPressedOnce) {
+                        finish()
+                    } else {
+                        backPressedOnce = true
+                        Toast.makeText(this, "اضغط رجوع مرة ثانية للخروج", Toast.LENGTH_SHORT).show()
+                        backHandler.postDelayed({ backPressedOnce = false }, 2000)
+                    }
+                }
+            }
+            return true
         }
         return super.onKeyDown(keyCode, event)
     }
