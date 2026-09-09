@@ -60,47 +60,120 @@ class MainActivity : AppCompatActivity() {
                 if (window.__apexNavInjected) return;
                 window.__apexNavInjected = true;
 
+                // ---------- floating focus ring (independent of the page's own DOM/CSS) ----------
+                var ring = document.createElement('div');
+                ring.id = '__apex_focus_ring';
+                ring.style.cssText = [
+                    'position:fixed', 'left:0', 'top:0', 'width:0', 'height:0',
+                    'border:4px solid #00c8ff', 'border-radius:8px',
+                    'box-shadow:0 0 16px 2px rgba(0,200,255,0.9)',
+                    'pointer-events:none', 'z-index:2147483647',
+                    'transition:left 90ms ease-out, top 90ms ease-out, width 90ms ease-out, height 90ms ease-out, opacity 90ms',
+                    'opacity:0'
+                ].join(';');
+                document.documentElement.appendChild(ring);
+
+                var current = null;
+
+                function isVisible(el) {
+                    if (!el || !el.isConnected) return false;
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) return false;
+                    var style = window.getComputedStyle(el);
+                    if (style.visibility === 'hidden' || style.display === 'none') return false;
+                    if (parseFloat(style.opacity) === 0) return false;
+                    if (style.pointerEvents === 'none') return false;
+                    return true;
+                }
+
                 function getFocusable() {
-                    var selector = 'a, button, input, select, textarea, [onclick], [role="button"], .clickable, [tabindex]';
+                    var selector = 'a, button, input, select, textarea, [onclick], [role="button"], [role="tab"], [role="link"], .clickable, [tabindex]';
                     return Array.prototype.slice.call(document.querySelectorAll(selector))
                         .filter(function(el) {
-                            var rect = el.getBoundingClientRect();
-                            var style = window.getComputedStyle(el);
-                            return rect.width > 0 && rect.height > 0 &&
-                                   style.visibility !== 'hidden' && style.display !== 'none';
+                            if (el.disabled) return false;
+                            if (el.getAttribute('aria-hidden') === 'true') return false;
+                            var tabindex = el.getAttribute('tabindex');
+                            if (tabindex !== null && parseInt(tabindex, 10) < 0) return false;
+                            return isVisible(el);
                         });
                 }
 
-                function currentFocused() {
-                    var el = document.activeElement;
-                    if (el && el !== document.body) return el;
-                    var list = getFocusable();
-                    return list.length ? list[0] : null;
-                }
-
-                function highlight(el) {
-                    var prev = document.querySelector('.__apex_tv_focus');
-                    if (prev) prev.classList.remove('__apex_tv_focus');
-                    if (el) {
-                        el.classList.add('__apex_tv_focus');
-                        el.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
+                function updateRing() {
+                    if (current && isVisible(current)) {
+                        var r = current.getBoundingClientRect();
+                        ring.style.left = (r.left - 4) + 'px';
+                        ring.style.top = (r.top - 4) + 'px';
+                        ring.style.width = (r.width) + 'px';
+                        ring.style.height = (r.height) + 'px';
+                        ring.style.opacity = '1';
+                    } else {
+                        ring.style.opacity = '0';
                     }
                 }
 
-                var style = document.createElement('style');
-                style.innerHTML = '.__apex_tv_focus { outline: 4px solid #00c8ff !important; outline-offset: 2px !important; box-shadow: 0 0 12px #00c8ff !important; }';
-                document.head.appendChild(style);
+                function setCurrent(el, scroll) {
+                    current = el;
+                    if (el) {
+                        try { el.focus({preventScroll: true}); } catch (e) { el.focus(); }
+                        if (scroll !== false) {
+                            el.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
+                        }
+                    }
+                    updateRing();
+                }
+
+                // Keep the ring glued to its target even during animations/scroll/layout shifts.
+                (function ringLoop() {
+                    updateRing();
+                    requestAnimationFrame(ringLoop);
+                })();
+
+                // If the page mutates (e.g. player controls fade in/out), make sure our
+                // tracked element is still valid; otherwise silently reacquire the nearest one.
+                var mo = new MutationObserver(function() {
+                    if (current && !isVisible(current)) {
+                        var list = getFocusable();
+                        if (list.length) setCurrent(list[0], false);
+                        else updateRing();
+                    }
+                });
+                mo.observe(document.body, { attributes: true, childList: true, subtree: true });
+
+                // Many players hide their controls after inactivity and only reveal them on
+                // mouse movement. Simulate that so the remote can always reach them.
+                function wake() {
+                    var video = document.querySelector('video');
+                    var target = (video && video.getBoundingClientRect().width > 0) ? video : document.body;
+                    var rect = target.getBoundingClientRect();
+                    var x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+                    ['pointermove', 'mousemove', 'mouseover'].forEach(function(type) {
+                        try {
+                            target.dispatchEvent(new MouseEvent(type, {
+                                bubbles: true, cancelable: true, clientX: x, clientY: y
+                            }));
+                        } catch (e) {}
+                    });
+                }
+
+                function activeVideo() {
+                    var video = document.querySelector('video');
+                    return video || null;
+                }
 
                 function moveFocus(direction) {
-                    var current = currentFocused();
+                    wake();
+
                     var list = getFocusable();
-                    if (!list.length) return;
-                    if (!current || list.indexOf(current) === -1) {
-                        current = list[0];
-                        current.focus();
-                        highlight(current);
+
+                    if (!current || !isVisible(current) || list.indexOf(current) === -1) {
+                        if (list.length) { setCurrent(list[0]); return; }
+                        current = null;
+                        updateRing();
+                        // no interactive controls found at all -> fall back to controlling the video directly
+                        fallbackVideoAction(direction);
                         return;
                     }
+
                     var cRect = current.getBoundingClientRect();
                     var cx = cRect.left + cRect.width / 2;
                     var cy = cRect.top + cRect.height / 2;
@@ -114,35 +187,65 @@ class MainActivity : AppCompatActivity() {
                         var dx = ex - cx, dy = ey - cy;
 
                         var valid = false;
-                        if (direction === 'right' && dx > 5) valid = true;
-                        if (direction === 'left' && dx < -5) valid = true;
-                        if (direction === 'down' && dy > 5) valid = true;
-                        if (direction === 'up' && dy < -5) valid = true;
+                        if (direction === 'right' && dx > 4) valid = true;
+                        if (direction === 'left' && dx < -4) valid = true;
+                        if (direction === 'down' && dy > 4) valid = true;
+                        if (direction === 'up' && dy < -4) valid = true;
                         if (!valid) return;
 
                         var mainAxis = (direction === 'left' || direction === 'right') ? Math.abs(dx) : Math.abs(dy);
                         var crossAxis = (direction === 'left' || direction === 'right') ? Math.abs(dy) : Math.abs(dx);
-                        var score = mainAxis + crossAxis * 2;
+                        // heavily penalize candidates far off the main axis so movement stays predictable
+                        if (crossAxis > mainAxis * 2.5 + 40) return;
+                        var score = mainAxis + crossAxis * 1.6;
                         if (score < bestScore) { bestScore = score; best = el; }
                     });
 
                     if (best) {
-                        best.focus();
-                        highlight(best);
+                        setCurrent(best);
+                    } else {
+                        // nothing focusable further in that direction -> treat as a media control
+                        fallbackVideoAction(direction);
                     }
                 }
 
+                function fallbackVideoAction(direction) {
+                    var video = activeVideo();
+                    if (!video) return;
+                    if (direction === 'left') video.currentTime = Math.max(0, video.currentTime - 10);
+                    if (direction === 'right') video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+                    if (direction === 'up') video.volume = Math.min(1, video.volume + 0.1);
+                    if (direction === 'down') video.volume = Math.max(0, video.volume - 0.1);
+                }
+
                 window.__apexMove = moveFocus;
+
                 window.__apexClick = function() {
-                    var el = currentFocused();
-                    if (el) {
-                        el.click();
-                        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.focus();
+                    wake();
+                    if (current && isVisible(current)) {
+                        current.click();
+                        if (current.tagName === 'INPUT' || current.tagName === 'TEXTAREA') current.focus();
+                        return;
+                    }
+                    var video = activeVideo();
+                    if (video) {
+                        if (video.paused) video.play(); else video.pause();
                     }
                 };
 
-                var first = getFocusable()[0];
-                if (first) { first.focus(); highlight(first); }
+                window.__apexMedia = function(action) {
+                    wake();
+                    var video = activeVideo();
+                    if (!video) return;
+                    if (action === 'playpause') { if (video.paused) video.play(); else video.pause(); }
+                    if (action === 'play') video.play();
+                    if (action === 'pause') video.pause();
+                    if (action === 'seekf') video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+                    if (action === 'seekb') video.currentTime = Math.max(0, video.currentTime - 10);
+                };
+
+                var firstList = getFocusable();
+                if (firstList.length) setCurrent(firstList[0]);
             })();
         """.trimIndent()
 
@@ -204,6 +307,18 @@ class MainActivity : AppCompatActivity() {
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
             webView.evaluateJavascript("window.__apexClick && window.__apexClick();", null)
+            return true
+        }
+        val mediaAction = when (keyCode) {
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> "playpause"
+            KeyEvent.KEYCODE_MEDIA_PLAY -> "play"
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> "pause"
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> "seekf"
+            KeyEvent.KEYCODE_MEDIA_REWIND -> "seekb"
+            else -> null
+        }
+        if (mediaAction != null) {
+            webView.evaluateJavascript("window.__apexMedia && window.__apexMedia('$mediaAction');", null)
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_BACK) {
