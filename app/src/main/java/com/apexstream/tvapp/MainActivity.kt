@@ -6,6 +6,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.KeyEvent
+import android.view.View
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ProgressBar
@@ -23,7 +25,7 @@ class MainActivity : AppCompatActivity() {
     private val backHandler = Handler(Looper.getMainLooper())
 
     private var lastNavTime = 0L
-    private val navThrottleMs = 120L
+    private val navThrottleMs = 60L // زمن استجابة سريع ومثالي للريموت
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,20 +35,31 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webview)
         progressBar = findViewById(R.id.progressBar)
 
+        // تفعيل تسريع العتاد الكامل لـ WebView
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            databaseEnabled = true
+            allowFileAccess = true
             loadWithOverviewMode = true
             useWideViewPort = true
             mediaPlaybackRequiresUserGesture = false
-            userAgentString = userAgentString + " ApexStreamTVApp"
+            
+            cacheMode = WebSettings.LOAD_DEFAULT
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            
+            userAgentString = userAgentString + " ApexStreamTVApp/SmartTV Chromecast"
         }
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                progressBar.visibility = ProgressBar.GONE
-                injectSpatialNavigation()
+                progressBar.visibility = View.GONE
+                
+                // حقن السكربت الشامل والمراقب الذكي للتنقل
+                injectSmartTVNavigation()
                 webView.requestFocus()
             }
         }
@@ -54,112 +67,81 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(targetUrl)
     }
 
-    private fun injectSpatialNavigation() {
+    private fun injectSmartTVNavigation() {
         val js = """
             (function() {
-                if (window.__apexNavInjected) return;
+                if (window.__apexNavInjected) {
+                    if (window.__apexAcquire) window.__apexAcquire();
+                    return;
+                }
                 window.__apexNavInjected = true;
 
-                // Lightweight, event-driven navigation only — no per-frame loops and no
-                // whole-document MutationObservers, since those are what made the previous
-                // version sluggish on weaker hardware (fighting the video decoder for CPU).
-
+                // إضافة ستايل مربع التركيز المميز وتغليفه بالكامل
                 var FOCUS_CLASS = '__apex_focus';
                 var style = document.createElement('style');
+                style.id = '__apex_style';
                 style.innerHTML =
                     '.' + FOCUS_CLASS + ' {' +
-                    '  transform: scale(1.08) !important;' +
-                    '  transition: transform 120ms ease-out, box-shadow 120ms ease-out !important;' +
-                    '  box-shadow: 0 0 0 3px rgba(255,255,255,0.95), 0 10px 26px rgba(0,0,0,0.55) !important;' +
-                    '  z-index: 3 !important;' +
+                    '  outline: 4px solid #00E5FF !important;' +
+                    '  outline-offset: 3px !important;' +
+                    '  transform: scale(1.06) !important;' +
+                    '  transition: transform 90ms ease-out, outline 90ms ease-out !important;' +
+                    '  box-shadow: 0 0 20px rgba(0, 229, 255, 0.9) !important;' +
+                    '  z-index: 999999 !important;' +
                     '  position: relative !important;' +
                     '}';
                 document.head.appendChild(style);
 
                 var current = null;
 
-                function clearCurrent() {
-                    if (current) current.classList.remove(FOCUS_CLASS);
-                    current = null;
-                }
-
                 function isVisible(el) {
                     if (!el || !el.isConnected) return false;
                     var rect = el.getBoundingClientRect();
                     if (rect.width <= 0 || rect.height <= 0) return false;
                     var s = window.getComputedStyle(el);
-                    if (s.visibility === 'hidden' || s.display === 'none') return false;
-                    if (parseFloat(s.opacity) === 0) return false;
-                    if (s.pointerEvents === 'none') return false;
-                    return true;
+                    return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity) > 0;
                 }
 
-                // Cheap "is this actually on top" check (only ever called on a handful of
-                // elements per keypress, never on a timer/observer).
-                function isTopmost(el) {
-                    var r = el.getBoundingClientRect();
-                    var x = r.left + r.width / 2, y = r.top + r.height / 2;
-                    var hit = document.elementFromPoint(x, y);
-                    return !!hit && (hit === el || el.contains(hit) || hit.contains(el));
-                }
-
+                // استخراج كافة العناصر القابلة للتركيز بما فيها الأزرار الديناميكية كأزرار "تشغيل" و "المفضلة"
                 function getFocusable() {
-                    var selector = 'a, button, input, select, textarea, [onclick], [role="button"], [role="tab"], [role="link"], .clickable, [tabindex]';
-                    return Array.prototype.slice.call(document.querySelectorAll(selector))
-                        .filter(function(el) {
-                            if (el.disabled) return false;
-                            if (el.getAttribute('aria-hidden') === 'true') return false;
-                            var tabindex = el.getAttribute('tabindex');
-                            if (tabindex !== null && parseInt(tabindex, 10) < 0) return false;
-                            return isVisible(el);
-                        });
+                    var selector = 'button, a, input, select, textarea, [onclick], [role="button"], [role="tab"], [role="link"], .clickable, [tabindex]';
+                    var nodes = document.querySelectorAll(selector);
+                    var res = [];
+                    for (var i = 0; i < nodes.length; i++) {
+                        var el = nodes[i];
+                        if (el.disabled) continue;
+                        var tabindex = el.getAttribute('tabindex');
+                        if (tabindex !== null && parseInt(tabindex, 10) < 0) continue;
+                        if (isVisible(el)) res.push(el);
+                    }
+                    return res;
                 }
 
                 function setCurrent(el) {
-                    if (current === el) return;
+                    if (current === el && el && el.classList.contains(FOCUS_CLASS)) return;
                     if (current) current.classList.remove(FOCUS_CLASS);
                     current = el;
                     if (el) {
                         el.classList.add(FOCUS_CLASS);
                         try { el.focus({preventScroll: true}); } catch (e) {}
-                        el.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
+                        el.scrollIntoView({block: 'center', inline: 'center', behavior: 'smooth'});
                     }
                 }
 
-                function video() { return document.querySelector('video'); }
-
-                // While something is actually playing full-screen-ish, don't fight it with
-                // grid navigation — just control the video directly, unless a real, visible,
-                // on-top control (progress bar, settings button, etc.) shows up after waking it.
-                function playerActive() {
-                    var v = video();
-                    if (!v) return false;
-                    var r = v.getBoundingClientRect();
-                    if (r.width <= 0 || r.height <= 0) return false;
-                    var coverage = (r.width * r.height) / (window.innerWidth * window.innerHeight);
-                    return coverage > 0.45;
+                function acquireFirst() {
+                    var list = getFocusable();
+                    if (list.length) {
+                        // إعطاء أولوية لأزرار التشغيل أو المفضلة في حال كانت موجودة للشاشة الحالية
+                        var primaryBtn = list.find(function(el) {
+                            var txt = (el.textContent || '').trim();
+                            return /تشغيل|Play|المفضلة|Favorite/i.test(txt);
+                        });
+                        setCurrent(primaryBtn || list[0]);
+                        return true;
+                    }
+                    return false;
                 }
-
-                function wake() {
-                    var v = video();
-                    var target = (v && v.getBoundingClientRect().width > 0) ? v : document.body;
-                    var rect = target.getBoundingClientRect();
-                    var x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
-                    ['pointermove', 'mousemove', 'mouseover'].forEach(function(type) {
-                        try {
-                            target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-                        } catch (e) {}
-                    });
-                }
-
-                function fallbackVideoAction(direction) {
-                    var v = video();
-                    if (!v) return;
-                    if (direction === 'left') v.currentTime = Math.max(0, v.currentTime - 10);
-                    if (direction === 'right') v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
-                    if (direction === 'up') v.volume = Math.min(1, v.volume + 0.1);
-                    if (direction === 'down') v.volume = Math.max(0, v.volume - 0.1);
-                }
+                window.__apexAcquire = acquireFirst;
 
                 function pickBest(list, direction, from) {
                     var cRect = from.getBoundingClientRect();
@@ -167,130 +149,112 @@ class MainActivity : AppCompatActivity() {
                     var cy = cRect.top + cRect.height / 2;
                     var horizontal = (direction === 'left' || direction === 'right');
 
-                    // two passes: a strict cone first, then a looser one so we don't ever get
-                    // "stuck" needing many presses before something finally matches.
-                    var tolerances = [1.4, 3.5];
-                    for (var t = 0; t < tolerances.length; t++) {
-                        var best = null, bestScore = Infinity;
-                        for (var i = 0; i < list.length; i++) {
-                            var el = list[i];
-                            if (el === from) continue;
-                            var r = el.getBoundingClientRect();
-                            var ex = r.left + r.width / 2, ey = r.top + r.height / 2;
-                            var dx = ex - cx, dy = ey - cy;
+                    var best = null, bestScore = Infinity;
+                    for (var i = 0; i < list.length; i++) {
+                        var el = list[i];
+                        if (el === from) continue;
+                        var r = el.getBoundingClientRect();
+                        var ex = r.left + r.width / 2, ey = r.top + r.height / 2;
+                        var dx = ex - cx, dy = ey - cy;
 
-                            var valid = false;
-                            if (direction === 'right' && dx > 4) valid = true;
-                            if (direction === 'left' && dx < -4) valid = true;
-                            if (direction === 'down' && dy > 4) valid = true;
-                            if (direction === 'up' && dy < -4) valid = true;
-                            if (!valid) continue;
+                        if (direction === 'right' && dx <= 2) continue;
+                        if (direction === 'left' && dx >= -2) continue;
+                        if (direction === 'down' && dy <= 2) continue;
+                        if (direction === 'up' && dy >= -2) continue;
 
-                            var mainAxis = horizontal ? Math.abs(dx) : Math.abs(dy);
-                            var crossAxis = horizontal ? Math.abs(dy) : Math.abs(dx);
-                            if (crossAxis > mainAxis * tolerances[t] + 60) continue;
+                        var mainAxis = horizontal ? Math.abs(dx) : Math.abs(dy);
+                        var crossAxis = horizontal ? Math.abs(dy) : Math.abs(dx);
+                        var score = mainAxis + (crossAxis * 2.2);
 
-                            var score = mainAxis + crossAxis * 1.3;
-                            if (score < bestScore) { bestScore = score; best = el; }
-                        }
-                        if (best) return best;
+                        if (score < bestScore) { bestScore = score; best = el; }
                     }
-                    return null;
+                    return best;
                 }
 
-                function moveFocus(direction) {
-                    wake();
-
-                    if (playerActive()) {
-                        var onTopControls = getFocusable().filter(isTopmost);
-                        if (!onTopControls.length) {
-                            clearCurrent();
-                            fallbackVideoAction(direction);
-                            return;
-                        }
-                        if (!current || onTopControls.indexOf(current) === -1) {
-                            setCurrent(onTopControls[0]);
-                            return;
-                        }
-                        var nextInPlayer = pickBest(onTopControls, direction, current);
-                        if (nextInPlayer) setCurrent(nextInPlayer);
-                        else fallbackVideoAction(direction);
-                        return;
-                    }
-
+                window.__apexMove = function(direction) {
                     var list = getFocusable();
-                    if (!list.length) { clearCurrent(); return; }
+                    if (!list.length) return;
 
                     if (!current || !isVisible(current) || list.indexOf(current) === -1) {
-                        setCurrent(list[0]);
+                        acquireFirst();
                         return;
                     }
 
                     var next = pickBest(list, direction, current);
                     if (next) setCurrent(next);
-                }
-
-                window.__apexMove = moveFocus;
+                };
 
                 window.__apexClick = function() {
-                    wake();
-                    if (current && isVisible(current) && (!playerActive() || isTopmost(current))) {
+                    if (current && isVisible(current)) {
                         current.click();
-                        if (current.tagName === 'INPUT' || current.tagName === 'TEXTAREA') current.focus();
+                        // إعادة توجيه التركيز بعد الضغط للتكيف مع تغير الواجهة الديناميكي
+                        setTimeout(acquireFirst, 300);
+                        setTimeout(acquireFirst, 800);
                         return;
                     }
-                    var v = video();
+                    var v = document.querySelector('video');
                     if (v) { if (v.paused) v.play(); else v.pause(); }
                 };
 
                 window.__apexMedia = function(action) {
-                    wake();
-                    var v = video();
+                    var v = document.querySelector('video');
                     if (!v) return;
                     if (action === 'playpause') { if (v.paused) v.play(); else v.pause(); }
-                    if (action === 'play') v.play();
-                    if (action === 'pause') v.pause();
                     if (action === 'seekf') v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
                     if (action === 'seekb') v.currentTime = Math.max(0, v.currentTime - 10);
                 };
 
-                var firstList = getFocusable();
-                if (firstList.length) setCurrent(firstList[0]);
+                // مراقب تغيرات الـ DOM المباشر: يستشعر دخول الفيلم أو تغيير القوائم فوراً بدون إجهاد المعالج
+                var observer = new MutationObserver(function(mutations) {
+                    if (!current || !isVisible(current)) {
+                        acquireFirst();
+                    }
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+
+                // التفعيل الفوري
+                acquireFirst();
+                setTimeout(acquireFirst, 500);
+                setTimeout(acquireFirst, 1200);
             })();
         """.trimIndent()
 
         webView.evaluateJavascript(js, null)
     }
 
-    /**
-     * Tries to let the web page handle the back action itself:
-     * - exits native fullscreen (common for <video> fullscreen)
-     * - dispatches an Escape keydown (common convention to close players/modals)
-     * - pauses any playing <video>
-     * Returns (via callback) whether the page reported that something was closed.
-     */
     private fun tryWebPageBack(onResult: (Boolean) -> Unit) {
         val js = """
             (function() {
-                var handled = false;
-
+                // 1. خروج من وضع الشاشة الكاملة للمشغل إذا كان مفعلاً
                 if (document.fullscreenElement) {
                     document.exitFullscreen();
-                    handled = true;
+                    return true;
                 }
 
-                var evt = new KeyboardEvent('keydown', {
-                    key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
-                });
-                document.dispatchEvent(evt);
-
+                // 2. إغلاق المشغل إن كان يعرض فيديو حالياً دون الرجوع للرئيسية
                 var video = document.querySelector('video');
                 if (video && !video.paused) {
                     video.pause();
-                    handled = true;
+                    // إرسال زر خروج للمشغل لتسريع إغلاق طبقة التشغيل فقط
+                    var closeBtn = document.querySelector('.vjs-close-button, .close-player, [class*="close"]');
+                    if (closeBtn) closeBtn.click();
+                    return true;
                 }
 
-                return handled;
+                // 3. البحث عن أزرار الرجوع/الإغلاق داخل صفحة الفيلم نفسها كي لا تخرج للرئيسية
+                var candidates = Array.prototype.slice.call(
+                    document.querySelectorAll('button, a, [onclick], [role="button"]')
+                );
+                var backBtn = candidates.find(function(el) {
+                    var label = ((el.getAttribute('aria-label') || '') + ' ' + (el.title || '') + ' ' + el.textContent).toLowerCase();
+                    return /رجوع|إغلاق|خروج|back|close|exit/i.test(label);
+                });
+                if (backBtn && backBtn.offsetWidth > 0) {
+                    backBtn.click();
+                    return true;
+                }
+
+                return false;
             })();
         """.trimIndent()
 
@@ -332,14 +296,11 @@ class MainActivity : AppCompatActivity() {
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (webView.canGoBack()) {
-                webView.goBack()
-                return true
-            }
-
             tryWebPageBack { handled ->
                 if (!handled) {
-                    if (backPressedOnce) {
+                    if (webView.canGoBack()) {
+                        webView.goBack()
+                    } else if (backPressedOnce) {
                         finish()
                     } else {
                         backPressedOnce = true
