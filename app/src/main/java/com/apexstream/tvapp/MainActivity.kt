@@ -23,7 +23,7 @@ class MainActivity : AppCompatActivity() {
     private val backHandler = Handler(Looper.getMainLooper())
 
     private var lastNavTime = 0L
-    private val navThrottleMs = 180L
+    private val navThrottleMs = 120L
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,30 +60,47 @@ class MainActivity : AppCompatActivity() {
                 if (window.__apexNavInjected) return;
                 window.__apexNavInjected = true;
 
-                // ---------- floating focus ring (independent of the page's own DOM/CSS) ----------
-                var ring = document.createElement('div');
-                ring.id = '__apex_focus_ring';
-                ring.style.cssText = [
-                    'position:fixed', 'left:0', 'top:0', 'width:0', 'height:0',
-                    'border:4px solid #00c8ff', 'border-radius:8px',
-                    'box-shadow:0 0 16px 2px rgba(0,200,255,0.9)',
-                    'pointer-events:none', 'z-index:2147483647',
-                    'transition:left 90ms ease-out, top 90ms ease-out, width 90ms ease-out, height 90ms ease-out, opacity 90ms',
-                    'opacity:0'
-                ].join(';');
-                document.documentElement.appendChild(ring);
+                // Lightweight, event-driven navigation only — no per-frame loops and no
+                // whole-document MutationObservers, since those are what made the previous
+                // version sluggish on weaker hardware (fighting the video decoder for CPU).
+
+                var FOCUS_CLASS = '__apex_focus';
+                var style = document.createElement('style');
+                style.innerHTML =
+                    '.' + FOCUS_CLASS + ' {' +
+                    '  transform: scale(1.08) !important;' +
+                    '  transition: transform 120ms ease-out, box-shadow 120ms ease-out !important;' +
+                    '  box-shadow: 0 0 0 3px rgba(255,255,255,0.95), 0 10px 26px rgba(0,0,0,0.55) !important;' +
+                    '  z-index: 3 !important;' +
+                    '  position: relative !important;' +
+                    '}';
+                document.head.appendChild(style);
 
                 var current = null;
+
+                function clearCurrent() {
+                    if (current) current.classList.remove(FOCUS_CLASS);
+                    current = null;
+                }
 
                 function isVisible(el) {
                     if (!el || !el.isConnected) return false;
                     var rect = el.getBoundingClientRect();
                     if (rect.width <= 0 || rect.height <= 0) return false;
-                    var style = window.getComputedStyle(el);
-                    if (style.visibility === 'hidden' || style.display === 'none') return false;
-                    if (parseFloat(style.opacity) === 0) return false;
-                    if (style.pointerEvents === 'none') return false;
+                    var s = window.getComputedStyle(el);
+                    if (s.visibility === 'hidden' || s.display === 'none') return false;
+                    if (parseFloat(s.opacity) === 0) return false;
+                    if (s.pointerEvents === 'none') return false;
                     return true;
+                }
+
+                // Cheap "is this actually on top" check (only ever called on a handful of
+                // elements per keypress, never on a timer/observer).
+                function isTopmost(el) {
+                    var r = el.getBoundingClientRect();
+                    var x = r.left + r.width / 2, y = r.top + r.height / 2;
+                    var hit = document.elementFromPoint(x, y);
+                    return !!hit && (hit === el || el.contains(hit) || hit.contains(el));
                 }
 
                 function getFocusable() {
@@ -98,150 +115,143 @@ class MainActivity : AppCompatActivity() {
                         });
                 }
 
-                function updateRing() {
-                    if (current && isVisible(current)) {
-                        var r = current.getBoundingClientRect();
-                        ring.style.left = (r.left - 4) + 'px';
-                        ring.style.top = (r.top - 4) + 'px';
-                        ring.style.width = (r.width) + 'px';
-                        ring.style.height = (r.height) + 'px';
-                        ring.style.opacity = '1';
-                    } else {
-                        ring.style.opacity = '0';
-                    }
-                }
-
-                function setCurrent(el, scroll) {
+                function setCurrent(el) {
+                    if (current === el) return;
+                    if (current) current.classList.remove(FOCUS_CLASS);
                     current = el;
                     if (el) {
-                        try { el.focus({preventScroll: true}); } catch (e) { el.focus(); }
-                        if (scroll !== false) {
-                            el.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
-                        }
+                        el.classList.add(FOCUS_CLASS);
+                        try { el.focus({preventScroll: true}); } catch (e) {}
+                        el.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
                     }
-                    updateRing();
                 }
 
-                // Keep the ring glued to its target even during animations/scroll/layout shifts.
-                (function ringLoop() {
-                    updateRing();
-                    requestAnimationFrame(ringLoop);
-                })();
+                function video() { return document.querySelector('video'); }
 
-                // If the page mutates (e.g. player controls fade in/out), make sure our
-                // tracked element is still valid; otherwise silently reacquire the nearest one.
-                var mo = new MutationObserver(function() {
-                    if (current && !isVisible(current)) {
-                        var list = getFocusable();
-                        if (list.length) setCurrent(list[0], false);
-                        else updateRing();
-                    }
-                });
-                mo.observe(document.body, { attributes: true, childList: true, subtree: true });
+                // While something is actually playing full-screen-ish, don't fight it with
+                // grid navigation — just control the video directly, unless a real, visible,
+                // on-top control (progress bar, settings button, etc.) shows up after waking it.
+                function playerActive() {
+                    var v = video();
+                    if (!v) return false;
+                    var r = v.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    var coverage = (r.width * r.height) / (window.innerWidth * window.innerHeight);
+                    return coverage > 0.45;
+                }
 
-                // Many players hide their controls after inactivity and only reveal them on
-                // mouse movement. Simulate that so the remote can always reach them.
                 function wake() {
-                    var video = document.querySelector('video');
-                    var target = (video && video.getBoundingClientRect().width > 0) ? video : document.body;
+                    var v = video();
+                    var target = (v && v.getBoundingClientRect().width > 0) ? v : document.body;
                     var rect = target.getBoundingClientRect();
                     var x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
                     ['pointermove', 'mousemove', 'mouseover'].forEach(function(type) {
                         try {
-                            target.dispatchEvent(new MouseEvent(type, {
-                                bubbles: true, cancelable: true, clientX: x, clientY: y
-                            }));
+                            target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }));
                         } catch (e) {}
                     });
                 }
 
-                function activeVideo() {
-                    var video = document.querySelector('video');
-                    return video || null;
+                function fallbackVideoAction(direction) {
+                    var v = video();
+                    if (!v) return;
+                    if (direction === 'left') v.currentTime = Math.max(0, v.currentTime - 10);
+                    if (direction === 'right') v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
+                    if (direction === 'up') v.volume = Math.min(1, v.volume + 0.1);
+                    if (direction === 'down') v.volume = Math.max(0, v.volume - 0.1);
+                }
+
+                function pickBest(list, direction, from) {
+                    var cRect = from.getBoundingClientRect();
+                    var cx = cRect.left + cRect.width / 2;
+                    var cy = cRect.top + cRect.height / 2;
+                    var horizontal = (direction === 'left' || direction === 'right');
+
+                    // two passes: a strict cone first, then a looser one so we don't ever get
+                    // "stuck" needing many presses before something finally matches.
+                    var tolerances = [1.4, 3.5];
+                    for (var t = 0; t < tolerances.length; t++) {
+                        var best = null, bestScore = Infinity;
+                        for (var i = 0; i < list.length; i++) {
+                            var el = list[i];
+                            if (el === from) continue;
+                            var r = el.getBoundingClientRect();
+                            var ex = r.left + r.width / 2, ey = r.top + r.height / 2;
+                            var dx = ex - cx, dy = ey - cy;
+
+                            var valid = false;
+                            if (direction === 'right' && dx > 4) valid = true;
+                            if (direction === 'left' && dx < -4) valid = true;
+                            if (direction === 'down' && dy > 4) valid = true;
+                            if (direction === 'up' && dy < -4) valid = true;
+                            if (!valid) continue;
+
+                            var mainAxis = horizontal ? Math.abs(dx) : Math.abs(dy);
+                            var crossAxis = horizontal ? Math.abs(dy) : Math.abs(dx);
+                            if (crossAxis > mainAxis * tolerances[t] + 60) continue;
+
+                            var score = mainAxis + crossAxis * 1.3;
+                            if (score < bestScore) { bestScore = score; best = el; }
+                        }
+                        if (best) return best;
+                    }
+                    return null;
                 }
 
                 function moveFocus(direction) {
                     wake();
 
-                    var list = getFocusable();
-
-                    if (!current || !isVisible(current) || list.indexOf(current) === -1) {
-                        if (list.length) { setCurrent(list[0]); return; }
-                        current = null;
-                        updateRing();
-                        // no interactive controls found at all -> fall back to controlling the video directly
-                        fallbackVideoAction(direction);
+                    if (playerActive()) {
+                        var onTopControls = getFocusable().filter(isTopmost);
+                        if (!onTopControls.length) {
+                            clearCurrent();
+                            fallbackVideoAction(direction);
+                            return;
+                        }
+                        if (!current || onTopControls.indexOf(current) === -1) {
+                            setCurrent(onTopControls[0]);
+                            return;
+                        }
+                        var nextInPlayer = pickBest(onTopControls, direction, current);
+                        if (nextInPlayer) setCurrent(nextInPlayer);
+                        else fallbackVideoAction(direction);
                         return;
                     }
 
-                    var cRect = current.getBoundingClientRect();
-                    var cx = cRect.left + cRect.width / 2;
-                    var cy = cRect.top + cRect.height / 2;
+                    var list = getFocusable();
+                    if (!list.length) { clearCurrent(); return; }
 
-                    var best = null, bestScore = Infinity;
-                    list.forEach(function(el) {
-                        if (el === current) return;
-                        var r = el.getBoundingClientRect();
-                        var ex = r.left + r.width / 2;
-                        var ey = r.top + r.height / 2;
-                        var dx = ex - cx, dy = ey - cy;
-
-                        var valid = false;
-                        if (direction === 'right' && dx > 4) valid = true;
-                        if (direction === 'left' && dx < -4) valid = true;
-                        if (direction === 'down' && dy > 4) valid = true;
-                        if (direction === 'up' && dy < -4) valid = true;
-                        if (!valid) return;
-
-                        var mainAxis = (direction === 'left' || direction === 'right') ? Math.abs(dx) : Math.abs(dy);
-                        var crossAxis = (direction === 'left' || direction === 'right') ? Math.abs(dy) : Math.abs(dx);
-                        // heavily penalize candidates far off the main axis so movement stays predictable
-                        if (crossAxis > mainAxis * 2.5 + 40) return;
-                        var score = mainAxis + crossAxis * 1.6;
-                        if (score < bestScore) { bestScore = score; best = el; }
-                    });
-
-                    if (best) {
-                        setCurrent(best);
-                    } else {
-                        // nothing focusable further in that direction -> treat as a media control
-                        fallbackVideoAction(direction);
+                    if (!current || !isVisible(current) || list.indexOf(current) === -1) {
+                        setCurrent(list[0]);
+                        return;
                     }
-                }
 
-                function fallbackVideoAction(direction) {
-                    var video = activeVideo();
-                    if (!video) return;
-                    if (direction === 'left') video.currentTime = Math.max(0, video.currentTime - 10);
-                    if (direction === 'right') video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
-                    if (direction === 'up') video.volume = Math.min(1, video.volume + 0.1);
-                    if (direction === 'down') video.volume = Math.max(0, video.volume - 0.1);
+                    var next = pickBest(list, direction, current);
+                    if (next) setCurrent(next);
                 }
 
                 window.__apexMove = moveFocus;
 
                 window.__apexClick = function() {
                     wake();
-                    if (current && isVisible(current)) {
+                    if (current && isVisible(current) && (!playerActive() || isTopmost(current))) {
                         current.click();
                         if (current.tagName === 'INPUT' || current.tagName === 'TEXTAREA') current.focus();
                         return;
                     }
-                    var video = activeVideo();
-                    if (video) {
-                        if (video.paused) video.play(); else video.pause();
-                    }
+                    var v = video();
+                    if (v) { if (v.paused) v.play(); else v.pause(); }
                 };
 
                 window.__apexMedia = function(action) {
                     wake();
-                    var video = activeVideo();
-                    if (!video) return;
-                    if (action === 'playpause') { if (video.paused) video.play(); else video.pause(); }
-                    if (action === 'play') video.play();
-                    if (action === 'pause') video.pause();
-                    if (action === 'seekf') video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
-                    if (action === 'seekb') video.currentTime = Math.max(0, video.currentTime - 10);
+                    var v = video();
+                    if (!v) return;
+                    if (action === 'playpause') { if (v.paused) v.play(); else v.pause(); }
+                    if (action === 'play') v.play();
+                    if (action === 'pause') v.pause();
+                    if (action === 'seekf') v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
+                    if (action === 'seekb') v.currentTime = Math.max(0, v.currentTime - 10);
                 };
 
                 var firstList = getFocusable();
